@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- Make the binary name lowercase -->
+    <AssemblyName>hostctl</AssemblyName>
+    <RootNamespace>hostctl</RootNamespace>
+
+    <!-- Version info used by version -->
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- no external CLI libraries (no System.CommandLine) -->
+  </ItemGroup>
+
+</Project>
