@@ -1,5 +1,5 @@
 # 🎉 Hostctl
-hostctl is a command-line tool to manage your /etc/hosts file with isolated profiles, toggles, and comments. Quickly enable/disable groups, merge or switch environments, import/export entries, and apply changes safely across Linux, macOS, and Windows.
+hostctl is a fast CLI to manage your hosts file with isolated profiles, toggles, and comments. Enable/disable groups, switch environments, import/export entries, and apply changes across Linux, macOS, and Windows. Supports templates, backups & automation.
 
 ![version](https://img.shields.io/badge/version-1.0-blue)
 ![rating](https://img.shields.io/badge/rating-★★★★★-yellow)
