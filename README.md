@@ -20,12 +20,19 @@ Hostctl is a Windows CLI for managing the system hosts file with tag-based organ
 - Administrator privileges for commands that modify the hosts file (`add`, `edit`, `remove`, `backup`)
 - .NET 6 SDK (only needed if building from source)
 
+> [!IMPORTANT]
+> Run `add`, `edit`, `remove`, and `backup` from an elevated (Administrator) shell — without it, these commands fail because they write to the hosts file.
+
+---
+
 ### 🚀 Installation
 
 ```shell
 dotnet clean
 dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:PublishTrimmed=true
 ```
+
+---
 
 ### 🏆 Usage
 
@@ -48,6 +55,13 @@ Notes:
   • Hosts file    : C:\WINDOWS\system32\drivers\etc\hosts
 ```
 
+---
+
 ### 📜 License
 
 This project is licensed under the [MIT License](LICENSE).
+
+### ✉️ Contact
+
+**Natthasath Saksupanara** — Computer Technical Officer, NIDA  
+natthasath.sak@gmail.com
