@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -17,23 +18,49 @@ internal class Program
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "hostctl");
     private static readonly string MetaFile = Path.Combine(MetaDir, "hosts.tags.json");
 
+    private const string Esc = "";
+    private static readonly bool AnsiEnabled = EnableAnsi();
+
     private static int Main(string[] args)
     {
-        if (args.Length == 0 || HasAny(args, "--help", "-h") ||
-            (args.Length > 0 && args[0].Equals("help", StringComparison.OrdinalIgnoreCase)))
+        try { Console.OutputEncoding = Encoding.UTF8; } catch { /* best effort; keep system default if unsupported */ }
+
+        if (args.Length == 0)
         {
             PrintHelp();
             return 0;
         }
-        if (HasAny(args, "--version", "-V", "-v") ||
-            (args.Length > 0 && args[0].Equals("version", StringComparison.OrdinalIgnoreCase)))
+
+        var first = args[0];
+        if (first == "-h" || first.Equals("--help", StringComparison.OrdinalIgnoreCase))
+        {
+            PrintHelp();
+            return 0;
+        }
+        if (first == "-V" || first.Equals("--version", StringComparison.OrdinalIgnoreCase))
+        {
+            PrintVersion();
+            return 0;
+        }
+        if (first.Equals("help", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length > 1) return PrintCommandHelp(args[1]);
+            PrintHelp();
+            return 0;
+        }
+
+        var cmd = first.ToLowerInvariant();
+        var rest = args.Skip(1).Select(a => a == "-y" ? "--yes" : a).ToArray();
+
+        if (HasFlag(rest, "-h", "--help"))
+            return PrintCommandHelp(cmd);
+        if (HasFlag(rest, "-V", "--version"))
         {
             PrintVersion();
             return 0;
         }
 
-        var cmd = args[0].ToLowerInvariant();
-        var opt = ParseOptions(args.Skip(1).ToArray());
+        var opt = ParseOptions(rest);
 
         try
         {
@@ -43,36 +70,30 @@ internal class Program
                     DoList(opt);
                     break;
                 case "add":
-                    EnsureAdmin();
                     DoAdd(opt);
                     break;
                 case "edit":
-                    EnsureAdmin();
                     DoEdit(opt);
                     break;
                 case "remove":
-                    EnsureAdmin();
                     DoRemove(opt);
                     break;
                 case "tags":
-                    DoTags();
+                    DoTags(opt);
                     break;
                 case "backup":
-                    EnsureAdmin();
                     DoBackup();
-                    break;
-                case "help":
-                    PrintHelp();
-                    break;
-                case "version":
-                    PrintVersion();
                     break;
                 default:
                     Console.Error.WriteLine($"Unknown command: {cmd}");
-                    Console.Error.WriteLine();
-                    PrintHelp();
-                    return 1;
+                    Console.Error.WriteLine("Run 'hostctl --help' for usage.");
+                    return 2;
             }
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine("✖ " + ex.Message);
+            return 2;
         }
         catch (Exception ex)
         {
@@ -83,24 +104,158 @@ internal class Program
         return 0;
     }
 
+    // ---------------- Help ----------------
+
+    private static int PrintCommandHelp(string cmd)
+    {
+        switch (cmd.ToLowerInvariant())
+        {
+            case "list": PrintListHelp(); return 0;
+            case "add": PrintAddHelp(); return 0;
+            case "edit": PrintEditHelp(); return 0;
+            case "remove": PrintRemoveHelp(); return 0;
+            case "tags": PrintTagsHelp(); return 0;
+            case "backup": PrintBackupHelp(); return 0;
+            default:
+                Console.Error.WriteLine($"Unknown command: {cmd}");
+                Console.Error.WriteLine("Run 'hostctl --help' for usage.");
+                return 2;
+        }
+    }
+
     private static void PrintHelp()
     {
-        Console.WriteLine("hostctl - Windows hosts manager with tags");
+        Console.WriteLine("hostctl CLI");
         Console.WriteLine();
-        Console.WriteLine("Usage:");
-        Console.WriteLine("  hostctl list [--tag <name>] [--all] [--sort ip|name|tag] [--desc]");
-        Console.WriteLine("  hostctl add --ip <ip> --host <hostname[,hostname2]> [--tag tag1,tag2] [--comment \"text\"]");
-        Console.WriteLine("  hostctl edit --host <old> [--ip <newip>] [--rename <newhost>] [--tag \"+web,-old\"]");
-        Console.WriteLine("  hostctl remove --host <hostname>");
-        Console.WriteLine("  hostctl tags");
-        Console.WriteLine("  hostctl backup");
-        Console.WriteLine("  hostctl --help | -h");
-        Console.WriteLine("  hostctl --version | -V | -v");
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl [OPTIONS]");
+        Console.WriteLine("hostctl <COMMAND> [ARGS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Commands:"));
+        Console.WriteLine("  list              List host entries");
+        Console.WriteLine("  add               Add a new host entry");
+        Console.WriteLine("  edit              Edit an existing host entry");
+        Console.WriteLine("  remove            Remove a host entry");
+        Console.WriteLine("  tags              List all tags currently in use");
+        Console.WriteLine("  backup            Create a timestamped backup of the hosts file");
+        Console.WriteLine("  help              Print this message or the help of the given subcommand(s)");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintHelpVersionOptions();
         Console.WriteLine();
         Console.WriteLine("Notes:");
-        Console.WriteLine("  • Commands that modify the hosts file require Administrator privileges.");
-        Console.WriteLine($"  • Tags metadata: {MetaFile}");
-        Console.WriteLine($"  • Hosts file    : {HostsPath}");
+        Console.WriteLine("  add, edit, remove, and backup require Administrator privileges (they write to the hosts file).");
+        Console.WriteLine("  Every write creates a timestamped backup and prints its path: <hosts>.bak_yyyyMMdd_HHmmss");
+        Console.WriteLine("  Exit codes: 0 = success, 1 = error, 2 = invalid usage/arguments.");
+        Console.WriteLine($"  Tags metadata: {MetaFile}");
+        Console.WriteLine($"  Hosts file    : {HostsPath}");
+    }
+
+    private static void PrintListHelp()
+    {
+        Console.WriteLine("List host entries");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl list [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--tag <NAME>", "Only show entries that have this tag");
+        PrintOptionLine("--all", "Include disabled (commented-out) entries");
+        PrintOptionLine("--sort <KEY>", "Sort the table by a column", "[possible values: ip, name, tag]");
+        PrintOptionLine("--desc", "Reverse the sort order");
+        PrintOptionLine("--json", "Print machine-readable JSON instead of a table");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintAddHelp()
+    {
+        Console.WriteLine("Add a new host entry");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl add --ip <IP> --host <HOSTNAME> [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--ip <IP>", "IP address for the new entry (required)");
+        PrintOptionLine("--host <HOSTNAME>", "Hostname to add; comma-separate to add multiple at the same IP (required)");
+        PrintOptionLine("--tag <TAGS>", "Comma-separated tags to attach, e.g. web,dev");
+        PrintOptionLine("--comment <TEXT>", "Trailing comment to attach to the entry");
+        PrintOptionLine("--dry-run", "Show what would be added without writing to the hosts file");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintEditHelp()
+    {
+        Console.WriteLine("Edit an existing host entry");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl edit --host <HOSTNAME> [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--host <HOSTNAME>", "Existing hostname to edit (required)");
+        PrintOptionLine("--ip <IP>", "New IP address");
+        PrintOptionLine("--rename <HOSTNAME>", "New hostname");
+        PrintOptionLine("--tag <OPS>", "Tag changes, e.g. \"+web,-old\"");
+        PrintOptionLine("--dry-run", "Show what would change without writing to the hosts file");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintRemoveHelp()
+    {
+        Console.WriteLine("Remove a host entry");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl remove --host <HOSTNAME> [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--host <HOSTNAME>", "Hostname to remove (required)");
+        PrintOptionLine("-y, --yes", "Skip the confirmation prompt (required when stdin is not a terminal)");
+        PrintOptionLine("--dry-run", "Show what would be removed without writing to the hosts file");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintTagsHelp()
+    {
+        Console.WriteLine("List all tags currently in use");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl tags [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--json", "Print machine-readable JSON instead of plain text");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintBackupHelp()
+    {
+        Console.WriteLine("Create a timestamped backup of the hosts file");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl backup [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintOptionLine(string flag, string description, string? possibleValues = null)
+    {
+        var indent = flag.StartsWith("--") ? "      " : "  ";
+        Console.WriteLine($"{indent}{flag}");
+        Console.WriteLine($"          {description}");
+        if (possibleValues != null)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"          {possibleValues}");
+        }
+        Console.WriteLine();
+    }
+
+    private static void PrintHelpVersionOptions()
+    {
+        Console.WriteLine("  -h, --help");
+        Console.WriteLine("          Print help (see a summary with '-h')");
+        Console.WriteLine();
+        Console.WriteLine("  -V, --version");
+        Console.WriteLine("          Print version");
     }
 
     private static void PrintVersion()
@@ -113,23 +268,53 @@ internal class Program
         Console.WriteLine(ver);
     }
 
+    // ---------------- ANSI underline ----------------
+
+    private static string Underline(string s) => AnsiEnabled ? $"{Esc}[4m{s}{Esc}[0m" : s;
+
+    private static bool EnableAnsi()
+    {
+        if (Console.IsOutputRedirected) return false;
+
+        var handle = GetStdHandle(StdOutputHandle);
+        if (!GetConsoleMode(handle, out var mode)) return false;
+        if ((mode & EnableVirtualTerminalProcessing) != 0) return true;
+        return SetConsoleMode(handle, mode | EnableVirtualTerminalProcessing);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    private const int StdOutputHandle = -11;
+    private const uint EnableVirtualTerminalProcessing = 0x0004;
+
     // ---------------- Commands ----------------
 
     private static void DoList(Dictionary<string, string?> opt)
     {
         var all = opt.ContainsKey("all");
         var tagFilter = Get(opt, "tag");
-        var sortKey = Get(opt, "sort")?.ToLowerInvariant(); // "", "ip", "name", "tag"
+        var sortKey = Get(opt, "sort").ToLowerInvariant();
         var desc = opt.ContainsKey("desc");
+        var json = opt.ContainsKey("json");
+
+        if (sortKey.Length > 0 && sortKey != "ip" && sortKey != "name" && sortKey != "tag")
+            throw new ArgumentException($"Invalid --sort value: {sortKey} (expected ip, name, or tag)");
 
         var lines = File.ReadAllLines(HostsPath);
         var tagsMap = LoadTags();
 
         var rows = new List<Row>();
-        foreach (var (entry, rawLine) in EnumerateHostEntries(lines))
+        foreach (var (entry, _, disabled) in EnumerateHostEntries(lines))
         {
             if (entry == null) continue;
-            if (!all && rawLine.TrimStart().StartsWith("#")) continue;
+            if (disabled && !all) continue;
 
             if (!string.IsNullOrWhiteSpace(tagFilter))
             {
@@ -142,11 +327,11 @@ internal class Program
                 ? ts.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray()
                 : Array.Empty<string>();
 
-            rows.Add(new Row(entry.Ip, entry.Hostname, tags, string.IsNullOrWhiteSpace(entry.Comment) ? "" : entry.Comment));
+            rows.Add(new Row(entry.Ip, entry.Hostname, tags, string.IsNullOrWhiteSpace(entry.Comment) ? "" : entry.Comment, disabled));
         }
 
         // Sorting
-        if (!string.IsNullOrWhiteSpace(sortKey))
+        if (sortKey.Length > 0)
         {
             if (sortKey == "ip")
             {
@@ -170,11 +355,23 @@ internal class Program
                     .ThenBy(r => ParseIpSortKey(r.Ip), IpKeyComparer.Instance)
                     .ToList();
             }
-            // unknown sort key → keep insertion order
         }
         if (desc) rows.Reverse();
 
-        // Render as fixed-width table
+        if (json)
+        {
+            var data = rows.Select(r => new
+            {
+                ip = r.Ip,
+                hostname = r.Host,
+                tags = r.Tags,
+                comment = r.Comment,
+                disabled = r.Disabled
+            });
+            Console.WriteLine(JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
         RenderTable(rows);
     }
 
@@ -184,27 +381,43 @@ internal class Program
         var hostCsv = Require(opt, "host", "--host is required");
         var comment = Get(opt, "comment");
         var tagCsv = Get(opt, "tag");
+        var dryRun = opt.ContainsKey("dry-run");
 
         var hosts = hostCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        var sb = new StringBuilder();
-        foreach (var line in File.ReadAllLines(HostsPath))
-            sb.AppendLine(line);
-
         foreach (var h in hosts)
         {
             if (IsHostPresent(h))
                 throw new InvalidOperationException($"Hostname already exists: {h}");
-            var cmt = string.IsNullOrWhiteSpace(comment) ? "" : $"  # {comment}";
-            sb.AppendLine($"{ip} {h}{cmt}");
         }
+
+        var cmt = string.IsNullOrWhiteSpace(comment) ? "" : $"  # {comment}";
+        var tags = string.IsNullOrWhiteSpace(tagCsv)
+            ? Array.Empty<string>()
+            : tagCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (dryRun)
+        {
+            Console.WriteLine("Dry run — no changes written.");
+            foreach (var h in hosts)
+                Console.WriteLine($"  + {ip} {h}{cmt}");
+            if (tags.Length > 0)
+                Console.WriteLine($"  + tags: {string.Join(",", tags)} -> {string.Join(",", hosts)}");
+            return;
+        }
+
+        EnsureAdmin();
+
+        var sb = new StringBuilder();
+        foreach (var line in File.ReadAllLines(HostsPath))
+            sb.AppendLine(line);
+        foreach (var h in hosts)
+            sb.AppendLine($"{ip} {h}{cmt}");
 
         BackupInternal();
         File.WriteAllText(HostsPath, sb.ToString());
 
-        if (!string.IsNullOrWhiteSpace(tagCsv))
+        if (tags.Length > 0)
         {
-            var tags = tagCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var map = LoadTags();
             foreach (var h in hosts)
             {
@@ -226,22 +439,36 @@ internal class Program
         var host = Require(opt, "host", "--host (existing) is required");
         var newIp = Get(opt, "ip");
         var rename = Get(opt, "rename");
-        var tagOps = Get(opt, "tag"); // e.g. "+web,-old"
+        var tagOps = Get(opt, "tag");
+        var dryRun = opt.ContainsKey("dry-run");
 
         var lines = File.ReadAllLines(HostsPath).ToList();
         var idx = FindHostLineIndex(lines, host);
         if (idx < 0)
             throw new InvalidOperationException($"Host not found in hosts file: {host}");
 
-        var (entry, _) = ParseEntry(lines[idx]);
+        var (entry, _, _) = ParseEntry(lines[idx]);
         if (entry == null)
             throw new InvalidOperationException($"Cannot parse host line for: {host}");
 
         var ip = string.IsNullOrWhiteSpace(newIp) ? entry.Ip : newIp!;
         var toName = string.IsNullOrWhiteSpace(rename) ? entry.Hostname : rename!;
         var comment = entry.Comment;
+        var newLine = $"{ip} {toName}" + (string.IsNullOrWhiteSpace(comment) ? "" : $"  # {comment}");
 
-        lines[idx] = $"{ip} {toName}" + (string.IsNullOrWhiteSpace(comment) ? "" : $"  # {comment}");
+        if (dryRun)
+        {
+            Console.WriteLine("Dry run — no changes written.");
+            Console.WriteLine($"  - {lines[idx]}");
+            Console.WriteLine($"  + {newLine}");
+            if (!string.IsNullOrWhiteSpace(tagOps))
+                Console.WriteLine($"  ~ tags: {tagOps}");
+            return;
+        }
+
+        EnsureAdmin();
+
+        lines[idx] = newLine;
 
         BackupInternal();
         File.WriteAllLines(HostsPath, lines);
@@ -274,10 +501,36 @@ internal class Program
     private static void DoRemove(Dictionary<string, string?> opt)
     {
         var host = Require(opt, "host", "--host is required");
+        var yes = opt.ContainsKey("yes");
+        var dryRun = opt.ContainsKey("dry-run");
+
         var lines = File.ReadAllLines(HostsPath).ToList();
         var idx = FindHostLineIndex(lines, host);
         if (idx < 0)
             throw new InvalidOperationException($"Host not found in hosts file: {host}");
+
+        if (dryRun)
+        {
+            Console.WriteLine("Dry run — no changes written.");
+            Console.WriteLine($"  - {lines[idx]}");
+            return;
+        }
+
+        EnsureAdmin();
+
+        if (!yes)
+        {
+            if (Console.IsInputRedirected)
+                throw new InvalidOperationException("Refusing to prompt for confirmation in a non-interactive session; pass --yes to proceed.");
+
+            Console.Write($"Remove host '{host}' ({lines[idx].Trim()})? [y/N] ");
+            var answer = Console.ReadLine();
+            if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Aborted.");
+                return;
+            }
+        }
 
         lines.RemoveAt(idx);
 
@@ -291,9 +544,19 @@ internal class Program
         Console.WriteLine("Removed.");
     }
 
-    private static void DoTags()
+    private static void DoTags(Dictionary<string, string?> opt)
     {
+        var json = opt.ContainsKey("json");
         var map = LoadTags();
+
+        if (json)
+        {
+            var data = map.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(k => k.Key, v => v.Value.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray());
+            Console.WriteLine(JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
+
         if (map.Count == 0)
         {
             Console.WriteLine("(no tags)");
@@ -308,7 +571,7 @@ internal class Program
     private static void DoBackup()
     {
         EnsureAdmin();
-        BackupInternal(true);
+        BackupInternal();
     }
 
     // ---------------- Rendering ----------------
@@ -328,8 +591,9 @@ internal class Program
 
         foreach (var r in rows)
         {
+            var ipText = r.Disabled ? "#" + r.Ip : r.Ip;
             var tagsText = string.Join(",", r.Tags);
-            Console.WriteLine($"{H(r.Ip, W_IP)}  {H(r.Host, W_HOST)}  {H(tagsText, W_TAGS)}  {r.Comment}");
+            Console.WriteLine($"{H(ipText, W_IP)}  {H(r.Host, W_HOST)}  {H(tagsText, W_TAGS)}  {r.Comment}");
         }
     }
 
@@ -343,8 +607,8 @@ internal class Program
 
     // ---------------- Helpers ----------------
 
-    private static bool HasAny(string[] args, params string[] flags)
-        => args.Any(a => flags.Any(f => string.Equals(a, f, StringComparison.OrdinalIgnoreCase)));
+    private static bool HasFlag(string[] args, string shortFlag, string longFlag)
+        => args.Any(a => a == shortFlag || a.Equals(longFlag, StringComparison.OrdinalIgnoreCase));
 
     private static Dictionary<string, string?> ParseOptions(string[] args)
     {
@@ -397,67 +661,88 @@ internal class Program
 
     private static bool IsHostPresent(string host)
     {
-        foreach (var (entry, _) in EnumerateHostEntries(File.ReadAllLines(HostsPath)))
+        foreach (var (entry, _, disabled) in EnumerateHostEntries(File.ReadAllLines(HostsPath)))
         {
-            if (entry != null && string.Equals(entry.Hostname, host, StringComparison.OrdinalIgnoreCase))
+            if (!disabled && entry != null && string.Equals(entry.Hostname, host, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;
     }
 
-    private static IEnumerable<(HostEntry? entry, string raw)> EnumerateHostEntries(IEnumerable<string> lines)
+    private static IEnumerable<(HostEntry? entry, string raw, bool disabled)> EnumerateHostEntries(IEnumerable<string> lines)
     {
         foreach (var line in lines)
         {
-            var (e, raw) = ParseEntry(line);
-            yield return (e, raw);
+            var (e, raw, disabled) = ParseEntry(line);
+            yield return (e, raw, disabled);
         }
     }
 
-    private static (HostEntry? entry, string raw) ParseEntry(string line)
+    private static (HostEntry? entry, string raw, bool disabled) ParseEntry(string line)
     {
         var raw = line;
         var trimmed = line.Trim();
         if (string.IsNullOrWhiteSpace(trimmed))
-            return (null, raw);
+            return (null, raw, false);
+
+        // A line that starts with '#' is either a disabled host entry ("#1.2.3.4 foo")
+        // or a free-text comment ("# note to self") — distinguished below by whether
+        // the first token parses as an IP address.
+        var disabled = trimmed.StartsWith("#");
+        var body = disabled ? trimmed.TrimStart('#').TrimStart() : trimmed;
 
         string? comment = null;
-        var hashIdx = trimmed.IndexOf('#');
+        var hashIdx = body.IndexOf('#');
         if (hashIdx >= 0)
         {
-            comment = trimmed[(hashIdx + 1)..].Trim();
-            trimmed = trimmed[..hashIdx].Trim();
+            comment = body[(hashIdx + 1)..].Trim();
+            body = body[..hashIdx].Trim();
         }
-        if (string.IsNullOrWhiteSpace(trimmed))
-            return (null, raw);
+        if (string.IsNullOrWhiteSpace(body))
+            return (null, raw, disabled);
 
-        var parts = trimmed.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries);
+        var parts = body.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2)
-            return (null, raw);
+            return (null, raw, disabled);
 
         var ip = parts[0];
         var host = parts[1];
 
-        return (new HostEntry { Ip = ip, Hostname = host, Comment = comment ?? "" }, raw);
+        if (disabled && !IPAddress.TryParse(ip, out _))
+            return (null, raw, disabled);
+
+        return (new HostEntry { Ip = ip, Hostname = host, Comment = comment ?? "" }, raw, disabled);
     }
 
     private static int FindHostLineIndex(List<string> lines, string host)
     {
         for (int i = 0; i < lines.Count; i++)
         {
-            var (e, _) = ParseEntry(lines[i]);
-            if (e != null && string.Equals(e.Hostname, host, StringComparison.OrdinalIgnoreCase))
+            var (e, _, disabled) = ParseEntry(lines[i]);
+            if (!disabled && e != null && string.Equals(e.Hostname, host, StringComparison.OrdinalIgnoreCase))
                 return i;
         }
         return -1;
     }
 
-    private static void BackupInternal(bool announce = false)
+    private static string BackupInternal()
     {
         var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var bak = HostsPath + $".bak_{ts}";
+        if (File.Exists(bak))
+        {
+            var i = 1;
+            string candidate;
+            do
+            {
+                candidate = $"{bak}_{i}";
+                i++;
+            } while (File.Exists(candidate));
+            bak = candidate;
+        }
         File.Copy(HostsPath, bak, overwrite: false);
-        if (announce) Console.WriteLine($"Backup created: {bak}");
+        Console.WriteLine($"Backup created: {bak}");
+        return bak;
     }
 
     private static Dictionary<string, HashSet<string>> LoadTags()
@@ -521,6 +806,6 @@ internal class Program
         }
     }
 
-    private record Row(string Ip, string Host, string[] Tags, string Comment);
+    private record Row(string Ip, string Host, string[] Tags, string Comment, bool Disabled);
     private record HostEntry { public string Ip { get; init; } = ""; public string Hostname { get; init; } = ""; public string Comment { get; init; } = ""; }
 }
