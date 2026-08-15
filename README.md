@@ -87,6 +87,8 @@ hostctl remove --host api.local --yes
 - Exit codes: `2` now means invalid usage/arguments (e.g. a missing required flag or an unrecognized `--sort` value), `1` is a runtime error, `0` is success — previously every failure exited `1`.
 - `list --all` previously did nothing (a parsing bug always hid commented-out entries); it now genuinely shows them, prefixed with `#`.
 
+**1.0.0** — initial release: `list`/`add`/`edit`/`remove`/`tags`/`backup` commands for the Windows hosts file, with tag-based filtering and sorting.
+
 ### 📜 License
 
 This project is licensed under the [MIT License](LICENSE).
