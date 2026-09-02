@@ -18,6 +18,9 @@ internal class Program
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "hostctl");
     private static readonly string MetaFile = Path.Combine(MetaDir, "hosts.tags.json");
 
+    private const int DefaultMaxBackupCount = 3;
+    private const int DefaultMaxBackupAgeDays = 30;
+
     private const string Esc = "";
     private static readonly bool AnsiEnabled = EnableAnsi();
 
@@ -82,7 +85,10 @@ internal class Program
                     DoTags(opt);
                     break;
                 case "backup":
-                    DoBackup();
+                    DoBackup(opt);
+                    break;
+                case "restore":
+                    DoRestore(opt);
                     break;
                 default:
                     Console.Error.WriteLine($"Unknown command: {cmd}");
@@ -116,6 +122,7 @@ internal class Program
             case "remove": PrintRemoveHelp(); return 0;
             case "tags": PrintTagsHelp(); return 0;
             case "backup": PrintBackupHelp(); return 0;
+            case "restore": PrintRestoreHelp(); return 0;
             default:
                 Console.Error.WriteLine($"Unknown command: {cmd}");
                 Console.Error.WriteLine("Run 'hostctl --help' for usage.");
@@ -138,14 +145,16 @@ internal class Program
         Console.WriteLine("  remove            Remove a host entry");
         Console.WriteLine("  tags              List all tags currently in use");
         Console.WriteLine("  backup            Create a timestamped backup of the hosts file");
+        Console.WriteLine("  restore           Restore the hosts file from a previous backup");
         Console.WriteLine("  help              Print this message or the help of the given subcommand(s)");
         Console.WriteLine();
         Console.WriteLine(Underline("Options:"));
         PrintHelpVersionOptions();
         Console.WriteLine();
         Console.WriteLine("Notes:");
-        Console.WriteLine("  add, edit, remove, and backup require Administrator privileges (they write to the hosts file).");
+        Console.WriteLine("  add, edit, remove, backup, and restore require Administrator privileges (they write to the hosts file).");
         Console.WriteLine("  Every write creates a timestamped backup and prints its path: <hosts>.bak_yyyyMMdd_HHmmss");
+        Console.WriteLine($"  Backups are pruned automatically: keeps the {DefaultMaxBackupCount} most recent and deletes any older than {DefaultMaxBackupAgeDays} days (override via 'hostctl backup --max-count/--max-age-days').");
         Console.WriteLine("  Exit codes: 0 = success, 1 = error, 2 = invalid usage/arguments.");
         Console.WriteLine($"  Tags metadata: {MetaFile}");
         Console.WriteLine($"  Hosts file    : {HostsPath}");
@@ -233,6 +242,26 @@ internal class Program
         Console.WriteLine("hostctl backup [OPTIONS]");
         Console.WriteLine();
         Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--max-count <N>", $"Keep at most this many backups; older ones are deleted (default: {DefaultMaxBackupCount})");
+        PrintOptionLine("--max-age-days <N>", $"Delete backups older than this many days (default: {DefaultMaxBackupAgeDays})");
+        PrintHelpVersionOptions();
+    }
+
+    private static void PrintRestoreHelp()
+    {
+        Console.WriteLine("Restore the hosts file from a previous backup");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Usage:"));
+        Console.WriteLine("hostctl restore --list");
+        Console.WriteLine("hostctl restore --index <N> [OPTIONS]");
+        Console.WriteLine("hostctl restore --file <FILENAME> [OPTIONS]");
+        Console.WriteLine();
+        Console.WriteLine(Underline("Options:"));
+        PrintOptionLine("--list", "List available backups (most recent first) and exit");
+        PrintOptionLine("--index <N>", "Restore the Nth backup from --list (1 = most recent)");
+        PrintOptionLine("--file <FILENAME>", "Restore a specific backup by filename (as shown in --list) or full path");
+        PrintOptionLine("-y, --yes", "Skip the confirmation prompt (required when stdin is not a terminal)");
+        PrintOptionLine("--dry-run", "Show what would be restored without writing to the hosts file");
         PrintHelpVersionOptions();
     }
 
@@ -568,10 +597,78 @@ internal class Program
         }
     }
 
-    private static void DoBackup()
+    private static void DoBackup(Dictionary<string, string?> opt)
     {
         EnsureAdmin();
+        var maxCount = ParseIntOption(opt, "max-count", DefaultMaxBackupCount, "--max-count");
+        var maxAgeDays = ParseIntOption(opt, "max-age-days", DefaultMaxBackupAgeDays, "--max-age-days");
+        BackupInternal(maxCount, maxAgeDays);
+    }
+
+    private static void DoRestore(Dictionary<string, string?> opt)
+    {
+        var list = opt.ContainsKey("list");
+        var indexStr = Get(opt, "index");
+        var fileArg = Get(opt, "file");
+        var yes = opt.ContainsKey("yes");
+        var dryRun = opt.ContainsKey("dry-run");
+
+        var backups = ListBackups();
+
+        if (list)
+        {
+            PrintBackupList(backups);
+            return;
+        }
+
+        if (backups.Count == 0)
+            throw new InvalidOperationException("No backups found.");
+
+        FileInfo target;
+        if (!string.IsNullOrWhiteSpace(fileArg))
+        {
+            var name = Path.GetFileName(fileArg);
+            target = backups.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"Backup not found: {fileArg}");
+        }
+        else if (!string.IsNullOrWhiteSpace(indexStr))
+        {
+            if (!int.TryParse(indexStr, out var idx) || idx < 1 || idx > backups.Count)
+                throw new ArgumentException($"--index must be between 1 and {backups.Count} (see 'hostctl restore --list')");
+            target = backups[idx - 1];
+        }
+        else
+        {
+            throw new ArgumentException("Specify --index <N> or --file <FILENAME> (see 'hostctl restore --list').");
+        }
+
+        if (dryRun)
+        {
+            Console.WriteLine("Dry run — no changes written.");
+            Console.WriteLine($"  Would restore hosts file from: {target.Name} ({GetBackupTimestamp(target):yyyy-MM-dd HH:mm:ss})");
+            return;
+        }
+
+        EnsureAdmin();
+
+        if (!yes)
+        {
+            if (Console.IsInputRedirected)
+                throw new InvalidOperationException("Refusing to prompt for confirmation in a non-interactive session; pass --yes to proceed.");
+
+            Console.Write($"Restore hosts file from '{target.Name}' ({GetBackupTimestamp(target):yyyy-MM-dd HH:mm:ss})? This overwrites the current hosts file. [y/N] ");
+            var answer = Console.ReadLine();
+            if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Aborted.");
+                return;
+            }
+        }
+
         BackupInternal();
+        File.Copy(target.FullName, HostsPath, overwrite: true);
+
+        Console.WriteLine($"Restored hosts file from: {target.Name}");
     }
 
     // ---------------- Rendering ----------------
@@ -725,7 +822,7 @@ internal class Program
         return -1;
     }
 
-    private static string BackupInternal()
+    private static string BackupInternal(int maxCount = DefaultMaxBackupCount, int maxAgeDays = DefaultMaxBackupAgeDays)
     {
         var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var bak = HostsPath + $".bak_{ts}";
@@ -742,7 +839,92 @@ internal class Program
         }
         File.Copy(HostsPath, bak, overwrite: false);
         Console.WriteLine($"Backup created: {bak}");
+
+        PruneBackups(maxCount, maxAgeDays);
+
         return bak;
+    }
+
+    private static void PruneBackups(int maxCount, int maxAgeDays)
+    {
+        var files = ListBackups();
+
+        var cutoff = DateTime.Now.AddDays(-maxAgeDays);
+        var byAge = files.Where(f => GetBackupTimestamp(f) < cutoff).ToList();
+        var byCount = files.Except(byAge).Skip(maxCount);
+
+        foreach (var f in byAge.Concat(byCount))
+        {
+            f.Delete();
+            Console.WriteLine($"Pruned old backup: {f.Name}");
+        }
+    }
+
+    private static List<FileInfo> ListBackups()
+    {
+        var dir = Path.GetDirectoryName(HostsPath)!;
+        var pattern = Path.GetFileName(HostsPath) + ".bak_*";
+        return Directory.GetFiles(dir, pattern)
+            .Select(f => new FileInfo(f))
+            .OrderByDescending(GetBackupTimestamp)
+            .ToList();
+    }
+
+    // File.Copy preserves the source file's LastWriteTime rather than stamping the copy
+    // time, so backup age/order must come from the timestamp encoded in the filename.
+    private static DateTime GetBackupTimestamp(FileInfo f)
+    {
+        const string marker = ".bak_";
+        var idx = f.Name.IndexOf(marker, StringComparison.Ordinal);
+        if (idx >= 0)
+        {
+            var rest = f.Name[(idx + marker.Length)..];
+            var candidate = rest.Length >= 15 ? rest[..15] : rest;
+            if (DateTime.TryParseExact(candidate, "yyyyMMdd_HHmmss", null,
+                    System.Globalization.DateTimeStyles.None, out var ts))
+                return ts;
+        }
+        return f.CreationTime;
+    }
+
+    private static void PrintBackupList(List<FileInfo> backups)
+    {
+        if (backups.Count == 0)
+        {
+            Console.WriteLine("(no backups found)");
+            return;
+        }
+
+        const int W_IDX = 5;
+        const int W_TS = 20;
+        const int W_SIZE = 10;
+
+        Console.WriteLine($"{PadOrTrim("#", W_IDX)}  {PadOrTrim("TIMESTAMP", W_TS)}  {PadOrTrim("SIZE", W_SIZE)}  FILE");
+        Console.WriteLine($"{new string('-', W_IDX)}  {new string('-', W_TS)}  {new string('-', W_SIZE)}  {new string('-', 20)}");
+
+        for (int i = 0; i < backups.Count; i++)
+        {
+            var f = backups[i];
+            var ts = GetBackupTimestamp(f).ToString("yyyy-MM-dd HH:mm:ss");
+            var size = FormatSize(f.Length);
+            Console.WriteLine($"{PadOrTrim((i + 1).ToString(), W_IDX)}  {PadOrTrim(ts, W_TS)}  {PadOrTrim(size, W_SIZE)}  {f.Name}");
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / (1024.0 * 1024.0):0.#} MB";
+    }
+
+    private static int ParseIntOption(Dictionary<string, string?> opt, string key, int defaultValue, string flagName)
+    {
+        var raw = Get(opt, key);
+        if (string.IsNullOrWhiteSpace(raw)) return defaultValue;
+        if (!int.TryParse(raw, out var value) || value < 1)
+            throw new ArgumentException($"{flagName} must be a positive integer");
+        return value;
     }
 
     private static Dictionary<string, HashSet<string>> LoadTags()
