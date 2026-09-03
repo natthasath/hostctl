@@ -34,6 +34,31 @@ dotnet clean
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=true
 ```
 
+### 🐳 Deployment
+
+Publish or update the [winget](https://github.com/microsoft/winget-create) package manifest after cutting a new GitHub release. Requires the `wingetcreate` CLI:
+
+```shell
+winget install wingetcreate
+```
+
+#### Create Package
+
+First-time publish — generates a manifest from the release asset and opens a PR against the community `winget-pkgs` repo.
+
+```shell
+wingetcreate new https://github.com/natthasath/hostctl/releases/download/v1.0.0/hostctl.exe
+```
+
+#### Update Package
+
+Check the currently published manifest, then submit the new release's URL and version (replace `<NEW_VERSION>` with the release you're publishing):
+
+```shell
+winget show --id Natthasath.hostctl --source winget
+wingetcreate update Natthasath.hostctl --version <NEW_VERSION> --urls https://github.com/natthasath/hostctl/releases/download/v<NEW_VERSION>/hostctl.exe --submit
+```
+
 ### 🏆 Usage
 
 ```shell
