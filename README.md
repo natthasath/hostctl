@@ -44,10 +44,11 @@ winget install wingetcreate
 
 #### Create Package
 
-First-time publish — generates a manifest from the release asset and opens a PR against the community `winget-pkgs` repo.
+First-time publish — generates a manifest from the release asset, then submits it as a PR against the community `winget-pkgs` repo.
 
 ```shell
-wingetcreate new https://github.com/natthasath/hostctl/releases/download/v1.0.0/hostctl.exe
+wingetcreate new --out ./manifest-out https://github.com/natthasath/hostctl/releases/download/v1.0.0/hostctl.exe
+wingetcreate submit --prtitle "New package: Natthasath.hostctl version 1.0.0" ./manifest-out
 ```
 
 #### Update Package
